@@ -5,6 +5,28 @@ import type {
   RoadmapMilestone
 } from '../../../shared/types';
 
+// Valid provider values for feature source
+const VALID_PROVIDERS = ['internal', 'canny', 'github_issue'] as const;
+type ValidProvider = typeof VALID_PROVIDERS[number];
+
+/**
+ * Validate and normalize provider value from source data.
+ * Returns the provider if valid, otherwise defaults to 'internal'.
+ */
+function validateProvider(provider: string): ValidProvider {
+  if (VALID_PROVIDERS.includes(provider as ValidProvider)) {
+    return provider as ValidProvider;
+  }
+  // Log warning for invalid provider values (in development)
+  if (process.env.NODE_ENV === 'development') {
+    console.warn(
+      `[transformers] Invalid provider value: "${provider}". ` +
+      `Valid values: ${VALID_PROVIDERS.join(', ')}. Defaulting to "internal".`
+    );
+  }
+  return 'internal';
+}
+
 interface RawRoadmapMilestone {
   id: string;
   title: string;
@@ -35,6 +57,7 @@ interface RawRoadmapFeature {
   phase_id?: string;
   phaseId?: string;
   dependencies?: string[];
+  reverse_dependencies?: string[];
   status?: string;
   acceptance_criteria?: string[];
   acceptanceCriteria?: string[];
@@ -44,6 +67,17 @@ interface RawRoadmapFeature {
   linkedSpecId?: string;
   competitor_insight_ids?: string[];
   competitorInsightIds?: string[];
+  dependency_validation?: {
+    has_missing?: boolean;
+    has_circular?: boolean;
+    missing_ids?: string[];
+    circular_paths?: string[][];
+  };
+  source?: {
+    provider: string;
+    imported_at?: string;
+    last_synced_at?: string;
+  };
 }
 
 interface RawRoadmap {
@@ -96,57 +130,6 @@ function transformPhase(raw: RawRoadmapPhase): RoadmapPhase {
   };
 }
 
-/**
- * Maps all known backend status values to canonical Kanban column statuses.
- * Includes valid statuses as identity mappings for consistent lookup.
- * Module-level constant for efficiency (not recreated on each call).
- */
-const STATUS_MAP: Record<string, RoadmapFeature['status']> = {
-  // Canonical Kanban statuses (identity mappings)
-  'under_review': 'under_review',
-  'planned': 'planned',
-  'in_progress': 'in_progress',
-  'done': 'done',
-  // Early-stage / ideation statuses → under_review
-  'idea': 'under_review',
-  'backlog': 'under_review',
-  'proposed': 'under_review',
-  'pending': 'under_review',
-  // Approved / scheduled statuses → planned
-  'approved': 'planned',
-  'scheduled': 'planned',
-  // Active development statuses → in_progress
-  'active': 'in_progress',
-  'building': 'in_progress',
-  // Completed statuses → done
-  'complete': 'done',
-  'completed': 'done',
-  'shipped': 'done'
-};
-
-/**
- * Normalizes a feature status string to a valid Kanban column status.
- * Handles case-insensitive matching and maps backend values to canonical statuses.
- *
- * @param status - The raw status string from the backend
- * @returns A valid RoadmapFeature status for Kanban display
- */
-function normalizeFeatureStatus(status: string | undefined): RoadmapFeature['status'] {
-  if (!status) return 'under_review';
-
-  const normalized = STATUS_MAP[status.toLowerCase()];
-
-  if (!normalized) {
-    // Debug log for unmapped statuses to aid future mapping additions
-    if (process.env.NODE_ENV === 'development') {
-      console.debug(`[Roadmap] normalizeFeatureStatus: unmapped status "${status}", defaulting to "under_review"`);
-    }
-    return 'under_review';
-  }
-
-  return normalized;
-}
-
 function transformFeature(raw: RawRoadmapFeature): RoadmapFeature {
   return {
     id: raw.id,
@@ -158,14 +141,25 @@ function transformFeature(raw: RawRoadmapFeature): RoadmapFeature {
     impact: (raw.impact as RoadmapFeature['impact']) || 'medium',
     phaseId: raw.phase_id || raw.phaseId || '',
     dependencies: raw.dependencies || [],
-    status: normalizeFeatureStatus(raw.status),
+    reverseDependencies: raw.reverse_dependencies,
+    dependencyValidation: raw.dependency_validation ? {
+      hasMissing: raw.dependency_validation.has_missing ?? false,
+      hasCircular: raw.dependency_validation.has_circular ?? false,
+      missingIds: raw.dependency_validation.missing_ids || [],
+      circularPaths: raw.dependency_validation.circular_paths || []
+    } : undefined,
+    status: (raw.status as RoadmapFeature['status']) || 'under_review',
     acceptanceCriteria: raw.acceptance_criteria || raw.acceptanceCriteria || [],
     userStories: raw.user_stories || raw.userStories || [],
     linkedSpecId: raw.linked_spec_id || raw.linkedSpecId,
-    competitorInsightIds: raw.competitor_insight_ids || raw.competitorInsightIds
+    competitorInsightIds: raw.competitor_insight_ids || raw.competitorInsightIds,
+    source: raw.source ? {
+      provider: validateProvider(raw.source.provider),
+      importedAt: raw.source.imported_at ? new Date(raw.source.imported_at) : undefined,
+      lastSyncedAt: raw.source.last_synced_at ? new Date(raw.source.last_synced_at) : undefined
+    } : undefined
   };
 }
-
 
 export function transformRoadmapFromSnakeCase(
   raw: RawRoadmap,
